@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import { extractPlaceFromCaption, searchKakao, buildPlace } from "../_lib/place-pipeline";
+import { extractPlacesFromCaption, geocodePlaces } from "../_lib/place-pipeline";
 
 // 릴스/쇼츠 링크 → 캡션 확보 → Gemini로 장소 추출 → Kakao로 좌표 확인
 // - 유튜브: 공식 oEmbed (무료, 안정적)
 // - 인스타: RapidAPI 스크래퍼 (서버에서 인스타 직접 스크래핑은 로그인 벽에 막힘)
 // 흐름 중 하나라도 실패하면 프론트에서 "직접 검색" 폴백을 띄운다.
 
-export const maxDuration = 30; // 스크래퍼 응답 대기 여유 (Vercel)
+export const maxDuration = 60; // 스크래퍼 + 모음 릴스 다건 Kakao 조회 여유 (Vercel)
 
 const BROWSER_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
@@ -166,7 +166,7 @@ export async function POST(request) {
     if (/instagram\.com/.test(url) && !process.env.RAPIDAPI_KEY) {
       return NextResponse.json(
         {
-          error: "인스타 릴스는 아직 준비 중이에요. 유튜브 쇼츠 링크로 시도해주세요 🙏",
+          error: "인스타 링크는 지원하지 않아요. 릴스 화면을 캡처해 스크린샷으로 올려주세요.",
           fallback: false,
         },
         { status: 422 }
@@ -184,8 +184,8 @@ export async function POST(request) {
       );
     }
 
-    const extracted = await extractPlaceFromCaption(caption);
-    if (!extracted?.placeName) {
+    const extracted = await extractPlacesFromCaption(caption);
+    if (extracted.length === 0) {
       return NextResponse.json(
         {
           error: "게시물에서 장소를 찾지 못했어요. 장소명을 직접 검색해 추가해주세요.",
@@ -195,19 +195,19 @@ export async function POST(request) {
       );
     }
 
-    const doc = await searchKakao(extracted.placeName, extracted.region);
-    if (!doc) {
+    const { places, failedNames } = await geocodePlaces(extracted, url);
+    if (places.length === 0) {
       return NextResponse.json(
         {
-          error: `'${extracted.placeName}'의 위치를 찾지 못했어요. 직접 검색해 추가해주세요.`,
+          error: `'${extracted[0].placeName}'의 위치를 찾지 못했어요. 직접 검색해 추가해주세요.`,
           fallback: true,
-          guess: extracted.placeName,
+          guess: extracted[0].placeName,
         },
         { status: 422 }
       );
     }
 
-    return NextResponse.json({ place: buildPlace(doc, extracted, url) });
+    return NextResponse.json({ places, failedNames });
   } catch (err) {
     console.error("[extract] error:", err);
     return NextResponse.json(

@@ -7,6 +7,10 @@ import Link from "next/link";
 const DEFAULT_POS = { lat: 37.3942, lng: 127.1104 };
 const STORAGE_KEY = "pinitnow_places";
 const NEAR_RADIUS_KM = 15;
+const KOREA_BOUNDS = [
+  [33.0, 125.0],
+  [38.7, 131.0],
+];
 
 const CATEGORIES = {
   cafe: { label: "카페", color: "#b45309" },
@@ -72,7 +76,9 @@ export default function App() {
   const [currentPos, setCurrentPos] = React.useState(DEFAULT_POS);
   const [scope, setScope] = React.useState("near");
   const [categoryFilter, setCategoryFilter] = React.useState("all");
-  const [selectedPlace, setSelectedPlace] = React.useState(null);
+  // 선택은 id 로만 들고, 실제 객체는 거리까지 계산된 목록에서 파생시킨다
+  // (원본 객체를 그대로 담으면 distance 가 없거나 위치 갱신에 뒤처진다)
+  const [selectedId, setSelectedId] = React.useState(null);
   const [linkInput, setLinkInput] = React.useState("");
   const [isLoading, setIsLoading] = React.useState(false);
   const [toastMsg, setToastMsg] = React.useState("");
@@ -83,6 +89,7 @@ export default function App() {
   const [searchLoading, setSearchLoading] = React.useState(false);
   const pendingReelUrl = React.useRef("");
   const fileInputRef = React.useRef(null);
+  const placesRef = React.useRef([]); // 중복 판정을 동기적으로 하기 위한 최신 목록
 
   const LRef = React.useRef(null);
   const mapRef = React.useRef(null);
@@ -94,10 +101,15 @@ export default function App() {
   React.useEffect(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) setPlaces(JSON.parse(saved));
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        placesRef.current = parsed;
+        setPlaces(parsed);
+      }
     } catch {}
   }, []);
   React.useEffect(() => {
+    placesRef.current = places;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(places));
     } catch {}
@@ -170,6 +182,10 @@ export default function App() {
         .sort((a, b) => a.distance - b.distance),
     [processedPlaces, scope, categoryFilter]
   );
+  const selectedPlace = React.useMemo(
+    () => processedPlaces.find((p) => p.id === selectedId) || null,
+    [processedPlaces, selectedId]
+  );
 
   React.useEffect(() => {
     const L = LRef.current;
@@ -177,16 +193,16 @@ export default function App() {
     markersRef.current.clearLayers();
     filteredPlaces.forEach((place) => {
       const color = CATEGORIES[place.category]?.color || "#111111";
-      const selected = selectedPlace?.id === place.id;
+      const selected = selectedId === place.id;
       const icon = L.divIcon({
         className: "",
         html: `<div class="pin-place ${selected ? "pin-place-selected" : ""}" style="background:${color}"></div>`,
         iconSize: [15, 15],
         iconAnchor: [7.5, 7.5],
       });
-      L.marker([place.lat, place.lng], { icon }).addTo(markersRef.current).on("click", () => setSelectedPlace(place));
+      L.marker([place.lat, place.lng], { icon }).addTo(markersRef.current).on("click", () => setSelectedId(place.id));
     });
-  }, [filteredPlaces, selectedPlace, mapReady]);
+  }, [filteredPlaces, selectedId, mapReady]);
 
   React.useEffect(() => {
     const onResize = () => mapRef.current?.invalidateSize();
@@ -196,27 +212,85 @@ export default function App() {
 
   React.useEffect(() => {
     if (!toastMsg) return;
-    const t = setTimeout(() => setToastMsg(""), 2500);
+    const t = setTimeout(() => setToastMsg(""), 3500);
     return () => clearTimeout(t);
   }, [toastMsg]);
 
-  const addPlace = (place, { fly = true } = {}) => {
-    let added = false;
-    setPlaces((prev) => {
-      const dup = prev.some((p) => p.name === place.name && Math.abs(p.lat - place.lat) < 0.0005 && Math.abs(p.lng - place.lng) < 0.0005);
-      if (dup) return prev;
-      added = true;
-      return [...prev, place];
-    });
-    setTimeout(() => {
-      if (!added) {
-        setToastMsg(`'${place.name}'은(는) 이미 추가된 곳이에요.`);
-        return;
+  // 스크린샷을 클립보드에서 바로 붙여넣기 (Ctrl/Cmd+V)
+  React.useEffect(() => {
+    const onPaste = (e) => {
+      const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
+      if (!item) return;
+      const file = item.getAsFile();
+      if (file) {
+        e.preventDefault();
+        uploadScreenshot(file);
       }
-      setToastMsg(`'${place.name}' 추가됨`);
-      if (fly && mapRef.current) mapRef.current.flyTo([place.lat, place.lng], 15, { duration: 1.2 });
-    }, 0);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  });
+
+  const isSamePlace = (a, b) =>
+    a.name === b.name &&
+    Math.abs(a.lat - b.lat) < 0.0005 &&
+    Math.abs(a.lng - b.lng) < 0.0005;
+
+  // 추가한 장소가 현재 필터에 걸려 지도에서 안 보이는 상황을 막는다
+  const revealPlaces = (list) => {
+    if (categoryFilter !== "all" && list.some((p) => p.category !== categoryFilter)) {
+      setCategoryFilter("all");
+    }
+    const farAway = list.some(
+      (p) => getDistance(currentPos.lat, currentPos.lng, p.lat, p.lng) > NEAR_RADIUS_KM
+    );
+    if (scope === "near" && farAway) setScope("all");
+
+    const map = mapRef.current;
+    const L = LRef.current;
+    if (!map || !L) return;
+    if (list.length === 1) {
+      map.flyTo([list[0].lat, list[0].lng], 16, { duration: 1.2 });
+    } else {
+      map.flyToBounds(L.latLngBounds(list.map((p) => [p.lat, p.lng])), {
+        padding: [60, 60],
+        maxZoom: 15,
+        duration: 1.2,
+      });
+    }
   };
+
+  // 여러 장소를 한 번에 추가 (모음 릴스 대응)
+  // 상태 업데이터는 순수해야 하므로, 중복 판정은 ref 로 동기적으로 처리한다
+  const addPlaces = (incoming, { failedNames = [] } = {}) => {
+    const current = placesRef.current;
+    const added = [];
+    const dups = [];
+    incoming.forEach((place) => {
+      if (current.some((p) => isSamePlace(p, place)) || added.some((p) => isSamePlace(p, place))) {
+        dups.push(place.name);
+      } else {
+        added.push(place);
+      }
+    });
+
+    if (added.length > 0) {
+      const next = [...current, ...added];
+      placesRef.current = next;
+      setPlaces(next);
+      setSelectedId(added.length === 1 ? added[0].id : null);
+      revealPlaces(added);
+    }
+
+    const parts = [];
+    if (added.length === 1) parts.push(`'${added[0].name}' 추가됨`);
+    else if (added.length > 1) parts.push(`${added.length}곳 추가됨`);
+    if (dups.length > 0) parts.push(`${dups.length}곳은 이미 있어요`);
+    if (failedNames.length > 0) parts.push(`${failedNames.length}곳은 위치를 못 찾았어요`);
+    setToastMsg(parts.join(" · ") || "추가할 장소가 없어요.");
+  };
+
+  const addPlace = (place) => addPlaces([place]);
 
   const handleAddLink = async (e) => {
     e.preventDefault();
@@ -230,8 +304,8 @@ export default function App() {
         body: JSON.stringify({ url }),
       });
       const data = await res.json();
-      if (res.ok && data.place) {
-        addPlace(data.place);
+      if (res.ok && data.places?.length) {
+        addPlaces(data.places, { failedNames: data.failedNames });
         setLinkInput("");
       } else if (data.fallback) {
         pendingReelUrl.current = url;
@@ -250,10 +324,14 @@ export default function App() {
   };
 
   // 스크린샷 업로드 → /api/extract-image (캡션이 없어도 화면 자막에서 상호명 추출)
-  const handleAddImage = async (e) => {
+  const handleAddImage = (e) => {
     const file = e.target.files?.[0];
     e.target.value = ""; // 같은 파일 재선택 허용
-    if (!file || isLoading) return;
+    if (file) uploadScreenshot(file);
+  };
+
+  const uploadScreenshot = async (file) => {
+    if (isLoading) return;
     setIsLoading(true);
     try {
       const resized = await downscaleImage(file);
@@ -261,8 +339,8 @@ export default function App() {
       form.append("image", resized, "screenshot.jpg");
       const res = await fetch("/api/extract-image", { method: "POST", body: form });
       const data = await res.json();
-      if (res.ok && data.place) {
-        addPlace(data.place);
+      if (res.ok && data.places?.length) {
+        addPlaces(data.places, { failedNames: data.failedNames });
       } else if (data.fallback) {
         pendingReelUrl.current = "";
         setSearchQuery(data.guess || "");
@@ -319,16 +397,62 @@ export default function App() {
   };
 
   const handleDelete = (id) => {
-    setPlaces((prev) => prev.filter((p) => p.id !== id));
-    setSelectedPlace(null);
+    const next = placesRef.current.filter((p) => p.id !== id);
+    placesRef.current = next;
+    setPlaces(next);
+    setSelectedId(null);
     setToastMsg("장소를 삭제했어요.");
   };
 
   // ── 재사용 UI ──
+  // 주어진 장소들이 한 화면에 들어오도록 지도를 맞춘다
+  const fitTo = (list) => {
+    const map = mapRef.current;
+    const L = LRef.current;
+    if (!map || !L) return;
+    if (list.length === 0) {
+      map.flyToBounds(L.latLngBounds(KOREA_BOUNDS), { duration: 1.2 });
+      return;
+    }
+    map.flyToBounds(L.latLngBounds(list.map((p) => [p.lat, p.lng])), {
+      padding: [60, 60],
+      maxZoom: 15,
+      duration: 1.2,
+    });
+  };
+
+  // 전국 전체로 전환 + 저장된 장소가 다 보이게 (없으면 남한 전역)
+  const showAllScope = () => {
+    setScope("all");
+    const all = placesRef.current;
+    fitTo(all.length > 0 ? [...all, currentPos] : []);
+  };
+
+  const handleToggleScope = () => {
+    if (scope === "near") {
+      showAllScope();
+      return;
+    }
+    setScope("near");
+    mapRef.current?.flyTo([currentPos.lat, currentPos.lng], 15, { duration: 1.2 });
+  };
+
+  // 카테고리를 바꾸면 그 카테고리로 보이는 장소들에 지도를 맞춘다
+  const handleCategoryFilter = (c) => {
+    setCategoryFilter(c);
+    const visible = placesRef.current.filter((p) => {
+      if (c !== "all" && p.category !== c) return false;
+      if (scope === "near" && getDistance(currentPos.lat, currentPos.lng, p.lat, p.lng) > NEAR_RADIUS_KM)
+        return false;
+      return true;
+    });
+    if (visible.length > 0) fitTo(scope === "near" ? [...visible, currentPos] : visible);
+  };
+
   const scopeToggle = (
     <button
       type="button"
-      onClick={() => setScope((s) => (s === "near" ? "all" : "near"))}
+      onClick={handleToggleScope}
       className="flex items-center gap-1.5 text-[13px] font-medium text-gray-600 hover:text-gray-900 transition"
     >
       <span className={cx("w-1.5 h-1.5 rounded-full", scope === "near" ? "bg-gray-900" : "bg-gray-300")} />
@@ -337,37 +461,40 @@ export default function App() {
   );
 
   const addForm = (
-    <form onSubmit={handleAddLink} className="flex gap-2">
-      <label className="flex-1 flex items-center gap-2 h-11 px-3 rounded-xl border border-gray-200 bg-gray-50 focus-within:border-gray-900 focus-within:bg-white transition">
-        <span className="text-gray-400 shrink-0"><Icons.link size={17} /></span>
-        <input
-          type="text"
-          value={linkInput}
-          onChange={(e) => setLinkInput(e.target.value)}
-          placeholder="유튜브 쇼츠 링크 붙여넣기"
+    <div className="flex flex-col gap-2">
+      <form onSubmit={handleAddLink} className="flex gap-2">
+        <label className="flex-1 flex items-center gap-2 h-11 px-3 rounded-xl border border-gray-200 bg-gray-50 focus-within:border-gray-900 focus-within:bg-white transition">
+          <span className="text-gray-400 shrink-0"><Icons.link size={17} /></span>
+          <input
+            type="text"
+            value={linkInput}
+            onChange={(e) => setLinkInput(e.target.value)}
+            placeholder="쇼츠 링크 붙여넣기"
+            disabled={isLoading}
+            className="w-full bg-transparent outline-none text-sm placeholder-gray-400 disabled:opacity-50"
+          />
+        </label>
+        <button
+          type="submit"
           disabled={isLoading}
-          className="w-full bg-transparent outline-none text-sm placeholder-gray-400 disabled:opacity-50"
-        />
-      </label>
+          className="h-11 px-4 rounded-xl bg-gray-900 text-white text-sm font-semibold whitespace-nowrap hover:bg-black active:scale-[0.98] transition disabled:opacity-50 min-w-[60px]"
+        >
+          {isLoading ? "분석중" : "추가"}
+        </button>
+      </form>
+
       <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleAddImage} />
       <button
         type="button"
         onClick={() => fileInputRef.current?.click()}
         disabled={isLoading}
-        aria-label="릴스 스크린샷으로 추가"
-        title="릴스·쇼츠 스크린샷으로 추가"
-        className="h-11 w-11 shrink-0 rounded-xl border border-gray-200 bg-gray-50 text-gray-500 flex items-center justify-center hover:border-gray-900 hover:text-gray-900 transition disabled:opacity-50"
+        className="flex items-center justify-center gap-2 h-11 rounded-xl border border-dashed border-gray-300 bg-white text-gray-600 text-sm font-medium hover:border-gray-900 hover:text-gray-900 transition disabled:opacity-50"
       >
-        <Icons.image size={18} />
+        <Icons.image size={17} />
+        {isLoading ? "분석중…" : "스크린샷으로 추가"}
+        <span className="text-[11px] text-gray-400 font-normal">인스타 릴스는 이쪽</span>
       </button>
-      <button
-        type="submit"
-        disabled={isLoading}
-        className="h-11 px-4 rounded-xl bg-gray-900 text-white text-sm font-semibold whitespace-nowrap hover:bg-black active:scale-[0.98] transition disabled:opacity-50 min-w-[60px]"
-      >
-        {isLoading ? "분석중" : "추가"}
-      </button>
-    </form>
+    </div>
   );
 
   const filterChips = (
@@ -375,7 +502,7 @@ export default function App() {
       {CATEGORY_KEYS.map((c) => (
         <button
           key={c}
-          onClick={() => setCategoryFilter(c)}
+          onClick={() => handleCategoryFilter(c)}
           className={cx(
             "px-3 h-8 rounded-full text-[13px] font-medium whitespace-nowrap transition border",
             categoryFilter === c ? "bg-gray-900 text-white border-gray-900" : "bg-white text-gray-500 border-gray-200 hover:border-gray-400"
@@ -401,21 +528,21 @@ export default function App() {
         <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center text-gray-400"><Icons.pin size={22} /></div>
         <div>
           <p className="font-semibold text-gray-900 text-sm">아직 저장한 곳이 없어요</p>
-          <p className="text-[13px] text-gray-400 mt-1">쇼츠 링크를 붙여넣거나, 릴스 스크린샷을 올려 첫 장소를 담아보세요.</p>
+          <p className="text-[13px] text-gray-400 mt-1">쇼츠 링크를 붙여넣거나, 릴스 스크린샷을 올려 첫 장소를 담아보세요.<br />여러 곳을 소개하는 모음 릴스도 한 번에 담겨요.</p>
         </div>
       </div>
     ) : filteredPlaces.length === 0 ? (
       <div className="flex flex-col items-center justify-center text-center gap-2 py-14">
         <p className="text-[13px] text-gray-400">{scope === "near" ? "내 주변에" : "이 조건에"} 맞는 장소가 없어요.</p>
         {scope === "near" && (
-          <button onClick={() => setScope("all")} className="text-[13px] font-semibold text-gray-900 underline underline-offset-2">전국 전체 보기</button>
+          <button onClick={showAllScope} className="text-[13px] font-semibold text-gray-900 underline underline-offset-2">전국 전체 보기</button>
         )}
       </div>
     ) : (
       <ul className="divide-y divide-gray-100">
         {filteredPlaces.map((p) => (
           <li key={p.id}>
-            <button onClick={() => setSelectedPlace(p)} className="w-full flex items-center gap-3 py-3.5 text-left hover:bg-gray-50 -mx-5 px-5 transition">
+            <button onClick={() => setSelectedId(p.id)} className="w-full flex items-center gap-3 py-3.5 text-left hover:bg-gray-50 -mx-5 px-5 transition">
               <span className="w-2 h-2 rounded-full shrink-0" style={{ background: CATEGORIES[p.category]?.color || "#111" }} />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
@@ -520,7 +647,7 @@ export default function App() {
 
       {/* 상세 시트 */}
       {selectedPlace && (
-        <div className="fixed inset-0 z-[9000] flex items-end md:items-center justify-center bg-black/40" onClick={() => setSelectedPlace(null)}>
+        <div className="fixed inset-0 z-[9000] flex items-end md:items-center justify-center bg-black/40" onClick={() => setSelectedId(null)}>
           <div className="w-full md:max-w-sm bg-white rounded-t-3xl md:rounded-3xl p-5 pb-8 md:pb-5" onClick={(e) => e.stopPropagation()}>
             <div className="md:hidden w-10 h-1 bg-gray-200 rounded-full mx-auto mb-5" />
             <div className="flex items-start justify-between gap-3 mb-1">
@@ -546,7 +673,7 @@ export default function App() {
               </div>
               <div className="flex items-center justify-between pt-1">
                 <button onClick={() => handleDelete(selectedPlace.id)} className="flex items-center gap-1.5 text-[13px] text-gray-400 hover:text-red-500 transition px-1 py-2"><Icons.trash size={15} /> 삭제</button>
-                <button onClick={() => setSelectedPlace(null)} className="text-[13px] font-medium text-gray-500 hover:text-gray-900 px-1 py-2">닫기</button>
+                <button onClick={() => setSelectedId(null)} className="text-[13px] font-medium text-gray-500 hover:text-gray-900 px-1 py-2">닫기</button>
               </div>
             </div>
           </div>

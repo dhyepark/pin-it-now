@@ -4,7 +4,9 @@
 
 **배포 링크: https://pin-it-now-alpha.vercel.app**
 
-<!-- 데모 스크린샷/GIF -->
+| 랜딩 | 지도 · 거리순 목록 |
+|---|---|
+| <img src="docs/screenshot-landing.png" width="320" alt="PinItNow 랜딩 화면"> | <img src="docs/screenshot-app.png" width="320" alt="지도에 카테고리별 핀이 찍히고 거리순으로 정렬된 메인 화면"> |
 
 ## 개요
 

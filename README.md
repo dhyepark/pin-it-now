@@ -2,7 +2,7 @@
 
 릴스·쇼츠로 저장해 둔 장소를 지도에 모아, 현재 위치에서 가까운 순으로 보여주는 서비스
 
-**배포 링크: https://pin-it-now-alpha.vercel.app**
+**배포 링크: https://pinitnow.vercel.app**
 
 | 랜딩 | 지도 · 거리순 목록 |
 |---|---|

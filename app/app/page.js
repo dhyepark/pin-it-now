@@ -51,6 +51,10 @@ const Icons = {
 };
 
 // 업로드 전 리사이즈: Gemini 비용·전송 시간 절약 (실패 시 원본 그대로, HEIC 등은 Gemini가 직접 처리)
+// 캔버스는 디코딩된 픽셀만 들고 있어서, 다시 인코딩하면 EXIF 가 통째로 사라진다.
+// 카메라 사진의 GPS 좌표가 서버와 Gemini 로 흘러가지 않는 건 이 재인코딩에 의존한다.
+// 그래서 실패 시 원본으로 폴백하지 않고 null 을 돌려준다 —
+// 원본 폴백은 하필 HEIC(아이폰 원본, GPS 가 박혀 있는 쪽)에서 발동한다.
 const downscaleImage = (file, maxDim = 1280) =>
   new Promise((resolve) => {
     const img = new Image();
@@ -62,11 +66,11 @@ const downscaleImage = (file, maxDim = 1280) =>
       canvas.width = Math.round(img.width * scale);
       canvas.height = Math.round(img.height * scale);
       canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-      canvas.toBlob((blob) => resolve(blob || file), "image/jpeg", 0.85);
+      canvas.toBlob(resolve, "image/jpeg", 0.85);
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
-      resolve(file);
+      resolve(null);
     };
     img.src = url;
   });
@@ -335,6 +339,10 @@ export default function App() {
     setIsLoading(true);
     try {
       const resized = await downscaleImage(file);
+      if (!resized) {
+        setToastMsg("이 이미지는 읽을 수 없어요. 스크린샷으로 저장한 뒤 올려주세요.");
+        return;
+      }
       const form = new FormData();
       form.append("image", resized, "screenshot.jpg");
       const res = await fetch("/api/extract-image", { method: "POST", body: form });
